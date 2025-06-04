@@ -1,159 +1,133 @@
-from controller import Robot, Motor, PositionSensor, InertialUnit, DistanceSensor, Camera
-import math
+from controller import Robot, Motor, DistanceSensor, PositionSensor
 
-class MyRobotController:
-    def __init__(self, robot):
-        self.robot = robot
-        self.time_step = int(self.robot.getBasicTimeStep())
-        self.max_speed = 6.28
+# Create robot instance
+robot = Robot()
 
-        self.wheel_radius = 0.022
-        self.wheel_distance = 0.11
+# Get the time step of the current world
+timestep = int(robot.getBasicTimeStep())
 
-        self.robot_pose = [0.0, 0.0, 0.0]
-        self.prev_left_pos = 0.0
-        self.prev_right_pos = 0.0
+# --- Initialize Motors (with clear naming based on WBT HingeJoints) ---
+motor_actual_left = robot.getDevice('motor2')
+motor_actual_right = robot.getDevice('motor1')
 
-        self.left_motor = self.robot.getDevice("motor2")
-        self.right_motor = self.robot.getDevice("motor1")
-        self.left_motor.setPosition(float('inf'))
-        self.right_motor.setPosition(float('inf'))
-        self.left_motor.setVelocity(0.0)
-        self.right_motor.setVelocity(0.0)
+motor_actual_left.setPosition(float('inf'))
+motor_actual_right.setPosition(float('inf'))
+motor_actual_left.setVelocity(0.0)
+motor_actual_right.setVelocity(0.0)
 
-        self.left_pos_sensor = self.robot.getDevice("pos1")
-        self.right_pos_sensor = self.robot.getDevice("pos2")
-        if self.left_pos_sensor: self.left_pos_sensor.enable(self.time_step)
-        if self.right_pos_sensor: self.right_pos_sensor.enable(self.time_step)
+# --- Initialize Distance Sensors ---
+ds_robot_left = robot.getDevice('ds0')
+ds_robot_front_left = robot.getDevice('ds1')
+ds_robot_front = robot.getDevice('ds2')
+ds_robot_front_right = robot.getDevice('ds3')
+ds_robot_right = robot.getDevice('ds4')
 
-        self.imu = self.robot.getDevice("imu")
-        if self.imu: self.imu.enable(self.time_step)
-        else: print("Warning: IMU device not found!")
+# Enable the sensors we will use for this logic
+if ds_robot_left: ds_robot_left.enable(timestep)
+if ds_robot_front: ds_robot_front.enable(timestep)
+if ds_robot_right: ds_robot_right.enable(timestep)
+# Optional: enable front-angled ones for future enhancement
+if ds_robot_front_left: ds_robot_front_left.enable(timestep)
+if ds_robot_front_right: ds_robot_front_right.enable(timestep)
 
-        self.ds_names = ["ds0", "ds1", "ds2", "ds3", "ds4"]
-        self.distance_sensors = []
-        for name in self.ds_names:
-            sensor = self.robot.getDevice(name)
-            if sensor:
-                sensor.enable(self.time_step)
-                self.distance_sensors.append(sensor)
-            else:
-                print(f"Warning: Distance sensor '{name}' not found!")
-                self.distance_sensors.append(None) 
 
-        self.camera = self.robot.getDevice("camera")
-        if self.camera: self.camera.enable(self.time_step)
-        else: print("Warning: Camera device not found!")
-            
-        self.TARGET_DIST_FROM_WALL = 0.15
-        self.KP_WALL_DIST = 7.0 
-        self.BASE_FORWARD_SPEED_PERCENT = 0.25 
-        self.FRONT_OBSTACLE_DIST_THRESHOLD = 0.12
+# --- Control Parameters ---
+FRONT_OBSTACLE_THRESHOLD_DISTANCE = 0.15 # If front obstacle closer than this, turn. 
+WALL_SIDE_THRESHOLD_DISTANCE = 0.25   # If a side wall is closer than this, react. 
+
+DEFAULT_FORWARD_SPEED = 2.0      # Base speed when moving forward (rad/s)
+SIDE_WALL_TURN_ADJUSTMENT = 1.0
+FRONT_OBSTACLE_TURN_SPEED = 1.5
+
+MAX_MOTOR_SPEED = 6.28
+
+# --- Sensor Conversion Characteristics ---
+MAX_SENSOR_RAW_VALUE = 1000.0
+SENSOR_MAX_DIST = 0.50
+SENSOR_MIN_DIST = 0.02
+
+# --- Main Control Loop ---
+print("Starting MODIFIED Basic Wall Following Controller V2...")
+# ... (print other parameters)
+
+robot.step(timestep)
+
+def raw_to_distance_fn(sensor_raw_value): 
+    """Converts raw sensor value (0-1000) to distance (m)."""
+    if sensor_raw_value is None: return SENSOR_MAX_DIST
+    clamped_raw = max(0.0, min(float(sensor_raw_value), MAX_SENSOR_RAW_VALUE))
+    distance = SENSOR_MAX_DIST - (clamped_raw / MAX_SENSOR_RAW_VALUE) * \
+               (SENSOR_MAX_DIST - SENSOR_MIN_DIST)
+    return distance
+
+time_in_turn_maneuver = 0 
+TURNING_MANEUVER_DURATION_STEPS = 15 
+
+while robot.step(timestep) != -1:
+    # --- Read and Convert Sensor Values ---
+    raw_front, raw_right, raw_left = 0.0, 0.0, 0.0
+    dist_front, dist_right_side, dist_left_side = SENSOR_MAX_DIST, SENSOR_MAX_DIST, SENSOR_MAX_DIST
+
+    if ds_robot_front:
+        raw_front = ds_robot_front.getValue()
+        dist_front = raw_to_distance_fn(raw_front)
+    if ds_robot_right:
+        raw_right = ds_robot_right.getValue()
+        dist_right_side = raw_to_distance_fn(raw_right)
+    if ds_robot_left:
+        raw_left = ds_robot_left.getValue()
+        dist_left_side = raw_to_distance_fn(raw_left)
+
+    target_speed_actual_left = 0.0
+    target_speed_actual_right = 0.0
+    action = "INIT"
+
+    # --- Control Logic ---
+    if time_in_turn_maneuver > 0:
+        action = "IN_FRONT_TURN_MANEUVER"
+        time_in_turn_maneuver -= 1
+        target_speed_actual_left = motor_actual_left.getVelocity() / MAX_MOTOR_SPEED * DEFAULT_FORWARD_SPEED 
+        target_speed_actual_right = motor_actual_right.getVelocity() / MAX_MOTOR_SPEED * DEFAULT_FORWARD_SPEED
+    
+    elif dist_front < FRONT_OBSTACLE_THRESHOLD_DISTANCE:
+        action = "FRONT_OBSTACLE -> START_TURN_L"
+        target_speed_actual_left = -FRONT_OBSTACLE_TURN_SPEED
+        target_speed_actual_right = FRONT_OBSTACLE_TURN_SPEED
+        time_in_turn_maneuver = TURNING_MANEUVER_DURATION_STEPS 
+    
+    elif dist_right_side < WALL_SIDE_THRESHOLD_DISTANCE:
+        action = "WALL_R_CLOSE -> TURN_L_GENTLE"
+        # Turn LEFT gently (actual left motor slightly slower, actual right motor slightly faster)
+        target_speed_actual_left = DEFAULT_FORWARD_SPEED - SIDE_WALL_TURN_ADJUSTMENT
+        target_speed_actual_right = DEFAULT_FORWARD_SPEED + SIDE_WALL_TURN_ADJUSTMENT
+    
+    elif dist_left_side < WALL_SIDE_THRESHOLD_DISTANCE:
+        action = "WALL_L_CLOSE -> TURN_R_GENTLE"
+        # Turn RIGHT gently
+        target_speed_actual_left = DEFAULT_FORWARD_SPEED + SIDE_WALL_TURN_ADJUSTMENT
+        target_speed_actual_right = DEFAULT_FORWARD_SPEED - SIDE_WALL_TURN_ADJUSTMENT
+    
+    else: 
+        action = "CLEAR -> FORWARD"
+        target_speed_actual_left = DEFAULT_FORWARD_SPEED
+        target_speed_actual_right = DEFAULT_FORWARD_SPEED
         
-        # Sensor characteristics from lookupTable
-        self.MAX_SENSOR_RAW_VALUE = 1023.0 
-        self.SENSOR_MAX_DIST = 0.50        
-        self.SENSOR_MIN_DIST = 0.02        
+    if time_in_turn_maneuver == 0 or action == "FRONT_OBSTACLE -> START_TURN_L": 
+        # Clamp motor speeds
+        target_speed_actual_left = max(-MAX_MOTOR_SPEED, min(MAX_MOTOR_SPEED, target_speed_actual_left))
+        target_speed_actual_right = max(-MAX_MOTOR_SPEED, min(MAX_MOTOR_SPEED, target_speed_actual_right))
 
-        print("Robot controller initialized.")
-        if self.robot.step(self.time_step) != -1:
-            self.prev_left_pos = self.left_pos_sensor.getValue() if self.left_pos_sensor else 0.0
-            self.prev_right_pos = self.right_pos_sensor.getValue() if self.right_pos_sensor else 0.0
-        else:
-            print("Exiting during init step.")
+        if motor_actual_left: motor_actual_left.setVelocity(target_speed_actual_left)
+        if motor_actual_right: motor_actual_right.setVelocity(target_speed_actual_right)
+    
+    # --- Debug Output ---
+    if robot.getTime() % 0.5 < timestep / 1000.0:
+        log_left_cmd = motor_actual_left.getVelocity() if motor_actual_left else 0.0
+        log_right_cmd = motor_actual_right.getVelocity() if motor_actual_right else 0.0
 
-    def set_speeds(self, left_speed_percent, right_speed_percent):
-        self.left_motor.setVelocity(self.max_speed * left_speed_percent)
-        self.right_motor.setVelocity(self.max_speed * right_speed_percent)
-
-    def update_odometry(self):
-        if not (self.left_pos_sensor and self.right_pos_sensor and self.imu):
-            return
-
-        current_left_pos = self.left_pos_sensor.getValue()
-        current_right_pos = self.right_pos_sensor.getValue()
-        delta_left_rad = current_left_pos - self.prev_left_pos
-        delta_right_rad = current_right_pos - self.prev_right_pos
-        dist_left = delta_left_rad * self.wheel_radius
-        dist_right = delta_right_rad * self.wheel_radius
-        delta_dist = (dist_left + dist_right) / 2.0
-        
-        imu_data = self.imu.getRollPitchYaw()
-        current_yaw = imu_data[2] 
-
-        self.robot_pose[0] += delta_dist * math.cos(self.robot_pose[2]) 
-        self.robot_pose[1] += delta_dist * math.sin(self.robot_pose[2]) 
-        self.robot_pose[2] = current_yaw 
-        while self.robot_pose[2] > math.pi: self.robot_pose[2] -= 2 * math.pi
-        while self.robot_pose[2] < -math.pi: self.robot_pose[2] += 2 * math.pi
-        self.prev_left_pos = current_left_pos
-        self.prev_right_pos = current_right_pos
-
-    def sensor_value_to_distance(self, sensor_val):
-        if sensor_val is None: return self.SENSOR_MAX_DIST 
-        if not isinstance(sensor_val, (int, float)): return self.SENSOR_MAX_DIST
-        clamped_val = max(0, min(sensor_val, self.MAX_SENSOR_RAW_VALUE))
-        distance = self.SENSOR_MAX_DIST - (clamped_val / self.MAX_SENSOR_RAW_VALUE) * \
-                   (self.SENSOR_MAX_DIST - self.SENSOR_MIN_DIST)
-        return distance
-
-    def run(self):
-        print_interval = 30
-        step_count = 0
-
-        if None in self.distance_sensors or len(self.distance_sensors) < 5 : 
-            print("Error: Not all distance sensors are properly initialized. Exiting.")
-            return
-
-        while self.robot.step(self.time_step) != -1:
-            self.update_odometry()
-            
-            raw_sensor_values = [ds.getValue() if ds else 0 for ds in self.distance_sensors] 
-            ds_distances = [self.sensor_value_to_distance(val) for val in raw_sensor_values]
-            
-            dist_L, dist_FL, dist_F, dist_FR, dist_R = ds_distances
-
-            left_speed_cmd_percent = 0.0
-            right_speed_cmd_percent = 0.0
-            
-            current_action = "WALL_FOLLOWING"
-
-            if dist_F < self.FRONT_OBSTACLE_DIST_THRESHOLD:
-                current_action = "FRONT_OBSTACLE_AVOID"
-                left_speed_cmd_percent = -0.4 # Sharp turn left
-                right_speed_cmd_percent = 0.4
-            elif dist_FR < self.FRONT_OBSTACLE_DIST_THRESHOLD * 1.1 and dist_F < self.FRONT_OBSTACLE_DIST_THRESHOLD * 1.7 :
-                 current_action = "CORNER_ANTICIPATE_FR"
-                 left_speed_cmd_percent = self.BASE_FORWARD_SPEED_PERCENT * 0.4 # Slow down and turn left
-                 right_speed_cmd_percent = self.BASE_FORWARD_SPEED_PERCENT * 0.8
-            elif dist_FL < self.FRONT_OBSTACLE_DIST_THRESHOLD * 1.1 and dist_F < self.FRONT_OBSTACLE_DIST_THRESHOLD * 1.7 : # Anticipate front-left corner too
-                 current_action = "CORNER_ANTICIPATE_FL"
-                 left_speed_cmd_percent = self.BASE_FORWARD_SPEED_PERCENT * 0.8 # Slow down and turn right
-                 right_speed_cmd_percent = self.BASE_FORWARD_SPEED_PERCENT * 0.4
-            else: # Wall Following (Right Wall)
-                wall_error_right = dist_R - self.TARGET_DIST_FROM_WALL
-                turn_adjustment = self.KP_WALL_DIST * wall_error_right
-
-                left_speed_cmd_percent = self.BASE_FORWARD_SPEED_PERCENT + turn_adjustment
-                right_speed_cmd_percent = self.BASE_FORWARD_SPEED_PERCENT - turn_adjustment
-                
-                if dist_R > (self.SENSOR_MAX_DIST - 0.05): # If very far from any right wall
-                     current_action = "SEARCHING_RIGHT_WALL"
-        
-            left_speed_cmd_percent = max(-1.0, min(1.0, left_speed_cmd_percent))
-            right_speed_cmd_percent = max(-1.0, min(1.0, right_speed_cmd_percent))
-            self.set_speeds(left_speed_cmd_percent, right_speed_cmd_percent)
-
-            if step_count % print_interval == 0:
-                print(f"--- Step {step_count} | Action: {current_action} ---")
-                print(f"RAW Values (L,FL,F,FR,R): [{raw_sensor_values[0]:.0f},{raw_sensor_values[1]:.0f},{raw_sensor_values[2]:.0f},{raw_sensor_values[3]:.0f},{raw_sensor_values[4]:.0f}]")
-                print(f"Pose (x,y,th): [{self.robot_pose[0]:.2f},{self.robot_pose[1]:.2f},{self.robot_pose[2]:.2f}]")
-                print(f"DS_Dists (L,FL,F,FR,R):[{dist_L:.2f},{dist_FL:.2f},{dist_F:.2f},{dist_FR:.2f},{dist_R:.2f}]")
-                print(f"Speeds CMD (L%,R%): [{left_speed_cmd_percent:.2f}, {right_speed_cmd_percent:.2f}]")
-
-            step_count += 1
-
-if __name__ == "__main__":
-    robot_instance = Robot()
-    controller = MyRobotController(robot_instance)
-    controller.run()
+        print(f"Time: {robot.getTime():.1f}s | Action: {action}")
+        print(f"  RAW (L,F,R): {raw_left:.0f}, {raw_front:.0f}, {raw_right:.0f}")
+        print(f"  DIST (L,F,R): {dist_left_side:.3f}m, {dist_front:.3f}m, {dist_right_side:.3f}m")
+        print(f"  Motor VEL (Act_L, Act_R): {log_left_cmd:.2f}, {log_right_cmd:.2f} rad/s")
+        if time_in_turn_maneuver > 0:
+             print(f"  Maneuver Steps Left: {time_in_turn_maneuver}")
