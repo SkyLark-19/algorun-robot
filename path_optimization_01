@@ -2,171 +2,170 @@ from controller import Robot, Motor, DistanceSensor, Camera, InertialUnit
 import numpy as np
 import cv2 
 import math
+import heapq 
 
 # Create robot instance
 robot = Robot()
 timestep = int(robot.getBasicTimeStep()) 
 
-# --- Robot Parameters (for Odometry) ---
-WHEEL_RADIUS = 0.022
-WHEEL_DISTANCE = 0.11 
-
-# --- Robot State (for Odometry) ---
-robot_pose = [0.0, 0.0, 0.0] 
-prev_left_encoder_val = 0.0
-prev_right_encoder_val = 0.0
-
-# --- MAPPING PARAMETERS ---
-MAP_WORLD_SIZE_X = 2.0 
-MAP_WORLD_SIZE_Y = 2.0  
-CELL_SIZE = 0.05        
-GRID_DIM_X = int(MAP_WORLD_SIZE_X / CELL_SIZE) 
-GRID_DIM_Y = int(MAP_WORLD_SIZE_Y / CELL_SIZE) 
-MAP_ORIGIN_X_WORLD = -MAP_WORLD_SIZE_X / 2.0 
-MAP_ORIGIN_Y_WORLD = -MAP_WORLD_SIZE_Y / 2.0 
+# --- Robot Parameters & State ---
+WHEEL_RADIUS = 0.022; WHEEL_DISTANCE = 0.11 
+robot_pose = [0.0, 0.0, 0.0]; prev_left_encoder_val = 0.0; prev_right_encoder_val = 0.0
+MAP_WORLD_SIZE_X = 2.0; MAP_WORLD_SIZE_Y = 2.0; CELL_SIZE = 0.05       
+GRID_DIM_X = int(MAP_WORLD_SIZE_X / CELL_SIZE); GRID_DIM_Y = int(MAP_WORLD_SIZE_Y / CELL_SIZE) 
+MAP_ORIGIN_X_WORLD = -MAP_WORLD_SIZE_X / 2.0; MAP_ORIGIN_Y_WORLD = -MAP_WORLD_SIZE_Y / 2.0 
 occupancy_grid = np.zeros((GRID_DIM_Y, GRID_DIM_X), dtype=np.uint8)
-
-# --- Sensor Mounting Angles ---
-SENSOR_ANGLES_RAD = {
-    'ds0': math.pi / 2, 'ds1': math.pi / 4, 'ds2': 0.0,
-    'ds3': -math.pi / 4, 'ds4': -math.pi / 2
-}
+SENSOR_ANGLES_RAD = {'ds0':math.pi/2,'ds1':math.pi/4,'ds2':0.0,'ds3':-math.pi/4,'ds4':-math.pi/2}
 ordered_ds_keys = ['ds0', 'ds1', 'ds2', 'ds3', 'ds4'] 
 
-# --- Motors ---
-motor_actual_left = robot.getDevice('motor2') 
-motor_actual_right = robot.getDevice('motor1')
-if motor_actual_left: 
-    motor_actual_left.setPosition(float('inf'))
-    motor_actual_left.setVelocity(0.0)
-if motor_actual_right: 
-    motor_actual_right.setPosition(float('inf'))
-    motor_actual_right.setVelocity(0.0)
-
-# --- Encoders ---
-encoder_left = robot.getDevice('pos2') 
-encoder_right = robot.getDevice('pos1')
+# --- Device Initializations ---
+motor_actual_left = robot.getDevice('motor2'); motor_actual_right = robot.getDevice('motor1')
+if motor_actual_left: motor_actual_left.setPosition(float('inf')); motor_actual_left.setVelocity(0.0)
+if motor_actual_right: motor_actual_right.setPosition(float('inf')); motor_actual_right.setVelocity(0.0)
+encoder_left = robot.getDevice('pos2'); encoder_right = robot.getDevice('pos1')
 encoders_ok = True
-if encoder_left: 
-    encoder_left.enable(timestep)
-else: 
-    print("ERROR: Left encoder (pos2) not found!")
-    encoders_ok = False
-if encoder_right: 
-    encoder_right.enable(timestep)
-else: 
-    print("ERROR: Right encoder (pos1) not found!")
-    encoders_ok = False
-if not encoders_ok:
-    print("CRITICAL: One or more encoders missing. Odometry will be inaccurate.")
-
-# --- IMU ---
+if encoder_left: encoder_left.enable(timestep)
+else: print("ERROR: Left encoder (pos2) not found!"); encoders_ok = False
+if encoder_right: encoder_right.enable(timestep)
+else: print("ERROR: Right encoder (pos1) not found!"); encoders_ok = False
+if not encoders_ok: print("CRITICAL: Encoders missing.")
 imu = robot.getDevice('imu')
-if imu: 
-    imu.enable(timestep)
-    print("IMU enabled.")
-else: 
-    print("ERROR: IMU device 'imu' not found!")
-
-# --- Distance Sensors ---
+if imu: imu.enable(timestep); print("IMU enabled.")
+else: print("ERROR: IMU device 'imu' not found!")
 ds_devices_map = {key: robot.getDevice(key) for key in ordered_ds_keys}
-distance_sensors_ordered_objects = [] 
-critical_ds_present = True 
-
+distance_sensors_ordered_objects = [] ; critical_ds_present = True
 for key in ordered_ds_keys:
     ds_device = ds_devices_map.get(key)
-    if ds_device:
-        ds_device.enable(timestep)
-        distance_sensors_ordered_objects.append(ds_device)
-        if key in ['ds0','ds2','ds4']: 
-             print(f"Sensor {key} enabled.")
-    else:
-        print(f"ERROR: Distance Sensor {key} not found!")
-        distance_sensors_ordered_objects.append(None) 
-        if key in ['ds0','ds2','ds4']: critical_ds_present = False
+    if ds_device: ds_device.enable(timestep); distance_sensors_ordered_objects.append(ds_device)
+    else: print(f"ERROR: DS {key} not found!"); distance_sensors_ordered_objects.append(None); critical_ds_present=False 
+if not critical_ds_present: print("CRITICAL: Core DS missing."); exit()
+camera = robot.getDevice('camera'); camera_width = 0; camera_height = 0
+if camera: camera.enable(timestep); camera_width = camera.getWidth(); camera_height = camera.getHeight(); print(f"Camera: {camera_width}x{camera_height}")
+else: print("ERROR: Camera not found!")
 
-if not critical_ds_present:
-    print("CRITICAL: One or more of L, F, R distance sensors missing for navigation. Exiting.")
-    exit()
 
-# --- CAMERA ---
-camera = robot.getDevice('camera') 
-camera_width = 0; camera_height = 0
-if camera:
-    camera.enable(timestep); camera_width = camera.getWidth(); camera_height = camera.getHeight()
-    print(f"Camera enabled. Width: {camera_width}, Height: {camera_height}")
-else: print("ERROR: Camera device 'camera' not found!")
-
-# --- Control Parameters (from V3.3.1 structure) ---
-FRONT_OBSTACLE_THRESHOLD_DISTANCE = 0.15 
-WALL_SIDE_THRESHOLD_DISTANCE = 0.22   
-DEFAULT_FORWARD_SPEED = 2.0    
-SIDE_WALL_TURN_ADJUSTMENT = 1.0 
-TURN_IN_PLACE_SPEED = 2.0 
-MAX_MOTOR_SPEED = 6.28    
+# --- Control Parameters ---
+FRONT_OBSTACLE_THRESHOLD_DISTANCE = 0.15; WALL_SIDE_THRESHOLD_DISTANCE = 0.22   
+DEFAULT_FORWARD_SPEED = 2.0; SIDE_WALL_TURN_ADJUSTMENT = 1.0 
+TURN_IN_PLACE_SPEED = 2.0; MAX_MOTOR_SPEED = 6.28    
 
 # --- Sensor Conversion ---
 MAX_SENSOR_RAW_VALUE = 1000.0; SENSOR_MAX_DIST = 0.50; SENSOR_MIN_DIST = 0.02
 
-# --- State Variables (from V3.3.1 structure) ---
-time_in_maneuver = 0      
-FRONT_TURN_DURATION_STEPS = 30 
-RECOVERY_TURN_DURATION_STEPS = 25 
-lap_count = 0; red_line_debounce_timer = 0; RED_LINE_DEBOUNCE_STEPS = 100
+# --- State Definitions & Variables ---
+STATE_EXPLORING_MAPPING = 0; STATE_IN_MANEUVER = 1       
+STATE_PLANNING_PATH = 3; STATE_PATH_FOLLOWING = 4    
+STATE_LAPS_DONE = 5         
+current_robot_state = STATE_EXPLORING_MAPPING 
+time_in_maneuver = 0; FRONT_TURN_DURATION_STEPS = 30; RECOVERY_TURN_DURATION_STEPS = 25 
+lap_count = 0;
+red_line_debounce_timer = 0; RED_LINE_DEBOUNCE_STEPS = 100
 stuck_on_side_wall_counter = 0; MAX_STEPS_STUCK_ON_SIDE = 150 
+TARGET_LAPS_EXPLORE = 1; TARGET_LAPS_TOTAL = 2   
+planned_path_grid_astar = [] 
+planned_path_world = [] 
+current_path_target_idx = 0
+lap_origin_grid_cell = None 
 
 # --- Red Color Detection ---
 LOWER_RED_HSV1 = np.array([0, 100, 100]); UPPER_RED_HSV1 = np.array([10, 255, 255])   
 LOWER_RED_HSV2 = np.array([160, 100, 100]); UPPER_RED_HSV2 = np.array([180, 255, 255])  
-RED_PIXEL_THRESHOLD = 500; TARGET_LAPS = 2 
+RED_PIXEL_THRESHOLD = 500
 
-# --- Helper Functions ---
-def raw_to_distance_fn(sensor_raw_value):
+# --- Helper Functions (AStarNode, heuristic, get_neighbors, a_star_search, raw_to_distance_fn, update_odometry, world_to_grid_coords, grid_to_world_coords_center) ---
+class AStarNode:
+    def __init__(self, position, parent=None): self.position = position; self.parent = parent; self.g = 0; self.h = 0; self.f = 0
+    def __eq__(self, other): return self.position == other.position
+    def __lt__(self, other): return self.f < other.f
+    def __hash__(self): return hash(self.position)
+def heuristic(node_pos, goal_pos): return abs(node_pos[0] - goal_pos[0]) + abs(node_pos[1] - goal_pos[1])
+def get_neighbors(current_node_pos, grid_dim_x_astar, grid_dim_y_astar):
+    neighbors = []; movimientos = [(0,1),(0,-1),(1,0),(-1,0)] 
+    for mov in movimientos:
+        neighbor_pos = (current_node_pos[0] + mov[0], current_node_pos[1] + mov[1])
+        if 0 <= neighbor_pos[0] < grid_dim_x_astar and 0 <= neighbor_pos[1] < grid_dim_y_astar:
+            neighbors.append(neighbor_pos)
+    return neighbors
+def a_star_search(grid_map_numpy_astar, start_pos_grid_astar, goal_pos_grid_astar): 
+    print(f"A* Search: Start {start_pos_grid_astar}, Goal {goal_pos_grid_astar}")
+    if start_pos_grid_astar == goal_pos_grid_astar: 
+        print("A* Warning: Start and Goal are the same. Path is just the start/goal cell."); 
+        return [start_pos_grid_astar] 
+    start_node = AStarNode(start_pos_grid_astar); goal_node = AStarNode(goal_pos_grid_astar)
+    open_list_astar = []; heapq.heappush(open_list_astar, start_node)
+    closed_set_astar = set()
+    max_iterations = GRID_DIM_X * GRID_DIM_Y * 5; iterations = 0 
+    path_found_flag = False
+    final_node = None
+    while open_list_astar and iterations < max_iterations:
+        iterations += 1; current_node = heapq.heappop(open_list_astar)
+        if current_node.position in closed_set_astar: continue
+        closed_set_astar.add(current_node.position)
+        if current_node == goal_node: path_found_flag = True; final_node = current_node; break
+        for neighbor_pos_grid_astar in get_neighbors(current_node.position, GRID_DIM_X, GRID_DIM_Y): 
+            if neighbor_pos_grid_astar in closed_set_astar: continue
+            neighbor_map_col_idx = neighbor_pos_grid_astar[0]
+            neighbor_map_row_idx = GRID_DIM_Y - 1 - neighbor_pos_grid_astar[1] 
+            if not (0 <= neighbor_map_row_idx < GRID_DIM_Y and 0 <= neighbor_map_col_idx < GRID_DIM_X): continue
+            if grid_map_numpy_astar[neighbor_map_row_idx, neighbor_map_col_idx] == 2: continue 
+            neighbor_node = AStarNode(neighbor_pos_grid_astar, current_node)
+            neighbor_node.g = current_node.g + 1; neighbor_node.h = heuristic(neighbor_node.position, goal_node.position)
+            neighbor_node.f = neighbor_node.g + neighbor_node.h
+            in_open_list_flag = False
+            for i, open_node_tuple_astar_node in enumerate(open_list_astar):
+                if neighbor_node == open_node_tuple_astar_node: 
+                    in_open_list_flag = True
+                    if neighbor_node.g < open_node_tuple_astar_node.g: 
+                        open_list_astar[i] = neighbor_node; heapq.heapify(open_list_astar)
+                    break
+            if not in_open_list_flag: heapq.heappush(open_list_astar, neighbor_node)
+    if path_found_flag and final_node:
+        path = []; temp = final_node
+        while temp is not None: path.append(temp.position); temp = temp.parent
+        print(f"A* Path found in {iterations} iterations, length {len(path)}."); return path[::-1] 
+    print(f"A* Path not found after {iterations} iterations."); return None
+def raw_to_distance_fn(sensor_raw_value): 
     if sensor_raw_value is None: return SENSOR_MAX_DIST
     try: val_float = float(sensor_raw_value)
     except (ValueError, TypeError): return SENSOR_MAX_DIST
     clamped_raw = max(0.0, min(val_float, MAX_SENSOR_RAW_VALUE))
-    distance = SENSOR_MAX_DIST - (clamped_raw / MAX_SENSOR_RAW_VALUE) * \
-               (SENSOR_MAX_DIST - SENSOR_MIN_DIST)
+    distance = SENSOR_MAX_DIST - (clamped_raw / MAX_SENSOR_RAW_VALUE) * (SENSOR_MAX_DIST - SENSOR_MIN_DIST)
     return distance
-
-def update_odometry():
-    global robot_pose, prev_left_encoder_val, prev_right_encoder_val 
-    if not (encoder_left and encoder_right):  
-        return 
+def update_odometry(): 
+    global robot_pose, prev_left_encoder_val, prev_right_encoder_val
+    if not (encoder_left and encoder_right): return 
     current_left_enc = encoder_left.getValue(); current_right_enc = encoder_right.getValue()
     delta_left_rad = current_left_enc - prev_left_encoder_val; delta_right_rad = current_right_enc - prev_right_encoder_val
     dist_left = delta_left_rad * WHEEL_RADIUS; dist_right = delta_right_rad * WHEEL_RADIUS
-    delta_dist = (dist_left + dist_right) / 2.0
-    current_yaw = robot_pose[2] 
-    if imu: 
-        imu_rpy = imu.getRollPitchYaw(); current_yaw = imu_rpy[2] 
-    else: 
-        delta_theta_enc = (dist_right - dist_left) / WHEEL_DISTANCE
-        current_yaw += delta_theta_enc
-
+    delta_dist = (dist_left + dist_right) / 2.0; current_yaw = robot_pose[2] 
+    if imu: imu_rpy = imu.getRollPitchYaw(); current_yaw = imu_rpy[2] 
+    else: delta_theta_enc = (dist_right - dist_left) / WHEEL_DISTANCE; current_yaw += delta_theta_enc
     dx = delta_dist * math.cos(robot_pose[2]); dy = delta_dist * math.sin(robot_pose[2])
     robot_pose[0] += dx; robot_pose[1] += dy; robot_pose[2] = current_yaw 
     while robot_pose[2] > math.pi: robot_pose[2] -= 2 * math.pi
     while robot_pose[2] < -math.pi: robot_pose[2] += 2 * math.pi
     prev_left_encoder_val = current_left_enc; prev_right_encoder_val = current_right_enc
-
-def world_to_grid_coords(world_x, world_y):
+def world_to_grid_coords(world_x, world_y): 
     grid_x = int((world_x - MAP_ORIGIN_X_WORLD) / CELL_SIZE)
     grid_y = int((world_y - MAP_ORIGIN_Y_WORLD) / CELL_SIZE) 
     grid_x = max(0, min(grid_x, GRID_DIM_X - 1)); grid_y = max(0, min(grid_y, GRID_DIM_Y - 1))
     return grid_x, grid_y 
+def grid_to_world_coords_center(grid_x_col, grid_y_from_world_origin): 
+    world_x = (grid_x_col + 0.5) * CELL_SIZE + MAP_ORIGIN_X_WORLD
+    world_y = (grid_y_from_world_origin + 0.5) * CELL_SIZE + MAP_ORIGIN_Y_WORLD
+    return world_x, world_y
 
 # --- Main Control Loop ---
-print("Starting Basic Wall Following Controller V3.3.2 (Fast Clear Fwd + Obstacle Mapping - Encoder Fix)...")
+print(f"Starting Controller(A* Correct Start/Goal)...")
 
 if robot.step(timestep) == -1: exit()
-if encoder_left: prev_left_encoder_val = encoder_left.getValue() 
-if encoder_right: prev_right_encoder_val = encoder_right.getValue() 
+if encoder_left: prev_left_encoder_val = encoder_left.getValue()
+if encoder_right: prev_right_encoder_val = encoder_right.getValue()
 
 log_interval = int(0.5 / (timestep / 1000.0)); log_interval = max(1, log_interval) 
 step_counter = 0; last_left_cmd_vel_for_log = 0.0; last_right_cmd_vel_for_log = 0.0
-robot_path_world_coords = []; map_print_interval = 200 
+robot_path_world_coords_lap1 = [] 
+map_print_interval = 200 
 
 while robot.step(timestep) != -1:
     step_counter +=1
@@ -174,15 +173,15 @@ while robot.step(timestep) != -1:
     if red_line_debounce_timer > 0: red_line_debounce_timer -= 1
     update_odometry() 
     
-    current_grid_x_robot, current_grid_y_robot = world_to_grid_coords(robot_pose[0], robot_pose[1])
-    map_row_idx_robot = GRID_DIM_Y - 1 - current_grid_y_robot 
+    current_grid_x_robot, current_grid_y_robot_world_origin = world_to_grid_coords(robot_pose[0], robot_pose[1])
+    map_row_idx_robot = GRID_DIM_Y - 1 - current_grid_y_robot_world_origin 
     map_col_idx_robot = current_grid_x_robot
     if 0 <= map_row_idx_robot < GRID_DIM_Y and 0 <= map_col_idx_robot < GRID_DIM_X:
-        occupancy_grid[map_row_idx_robot, map_col_idx_robot] = 1 
-    if lap_count < TARGET_LAPS : robot_path_world_coords.append((robot_pose[0], robot_pose[1]))
+        if occupancy_grid[map_row_idx_robot, map_col_idx_robot] == 0: 
+             occupancy_grid[map_row_idx_robot, map_col_idx_robot] = 1 
+    if lap_count < TARGET_LAPS_EXPLORE : robot_path_world_coords_lap1.append((robot_pose[0], robot_pose[1]))
 
-    ds_distances = [SENSOR_MAX_DIST] * 5 
-    raw_sensor_values_for_log = [0.0] * 5
+    ds_distances = [SENSOR_MAX_DIST]*5; raw_sensor_values_for_log = [0.0]*5
     for i, ds_key in enumerate(ordered_ds_keys):
         ds_device = distance_sensors_ordered_objects[i] 
         if ds_device:
@@ -194,12 +193,12 @@ while robot.step(timestep) != -1:
                     sensor_global_angle = robot_pose[2] + sensor_angle_offset
                     obstacle_wx = robot_pose[0] + dist_val * math.cos(sensor_global_angle)
                     obstacle_wy = robot_pose[1] + dist_val * math.sin(sensor_global_angle)
-                    obs_gx, obs_gy = world_to_grid_coords(obstacle_wx, obstacle_wy)
-                    obs_map_row_idx = GRID_DIM_Y - 1 - obs_gy; obs_map_col_idx = obs_gx
+                    obs_gx, obs_gy_world_origin = world_to_grid_coords(obstacle_wx, obstacle_wy)
+                    obs_map_row_idx = GRID_DIM_Y - 1 - obs_gy_world_origin; obs_map_col_idx = obs_gx
                     if 0 <= obs_map_row_idx < GRID_DIM_Y and 0 <= obs_map_col_idx < GRID_DIM_X:
                         if occupancy_grid[obs_map_row_idx, obs_map_col_idx] == 0 : 
                             occupancy_grid[obs_map_row_idx, obs_map_col_idx] = 2 
-    dist_L, dist_FL, dist_F, dist_FR, dist_R = ds_distances[0], ds_distances[1], ds_distances[2], ds_distances[3], ds_distances[4]
+    dist_L, dist_FL, dist_F, dist_FR, dist_R = ds_distances[0],ds_distances[1],ds_distances[2],ds_distances[3],ds_distances[4]
 
     if camera and camera_width > 0: 
         image_bytes = camera.getImage()
@@ -209,91 +208,167 @@ while robot.step(timestep) != -1:
             mask1 = cv2.inRange(image_hsv, LOWER_RED_HSV1, UPPER_RED_HSV1); mask2 = cv2.inRange(image_hsv, LOWER_RED_HSV2, UPPER_RED_HSV2)
             red_mask = cv2.bitwise_or(mask1, mask2); red_pixel_count = cv2.countNonZero(red_mask)
             if red_pixel_count > RED_PIXEL_THRESHOLD and red_line_debounce_timer == 0: 
-                red_line_detected_this_step = True; lap_count += 1
-                print(f"********** RED LINE DETECTED! Lap: {lap_count}, Pose: ({robot_pose[0]:.2f}, {robot_pose[1]:.2f}, {math.degrees(robot_pose[2]):.1f}deg) **********")
-                red_line_debounce_timer = RED_LINE_DEBOUNCE_STEPS                     
-                if lap_count >= TARGET_LAPS: 
-                    print(f"********** {TARGET_LAPS} laps completed. Stopping robot. **********")
-                    if motor_actual_left: motor_actual_left.setVelocity(0.0)
-                    if motor_actual_right: motor_actual_right.setVelocity(0.0)
-                    break 
+                red_line_detected_this_step = True
+                # Store current cell BEFORE incrementing lap_count, this is the end of the *previous* lap
+                current_lap_end_grid_cell = (map_col_idx_robot, current_grid_y_robot_world_origin)
+                
+                lap_count += 1 # Increment lap count first
+                print(f"********** RED LINE DETECTED! Now Lap: {lap_count}, Pose: ({robot_pose[0]:.2f}, {robot_pose[1]:.2f}, {math.degrees(robot_pose[2]):.1f}deg) **********")
+                red_line_debounce_timer = RED_LINE_DEBOUNCE_STEPS  
+                
+                if lap_origin_grid_cell is None: # This is the first time crossing the red line ever
+                    lap_origin_grid_cell = current_lap_end_grid_cell # This is the true start/finish for the entire run
+                    print(f"DEBUG: Lap Origin Set to {lap_origin_grid_cell}")
 
-    action = "INIT"; apply_new_motor_speeds = True 
-    target_speed_actual_left = 0.0; target_speed_actual_right = 0.0
-    current_log_left_vel = 0.0; current_log_right_vel = 0.0 
+                # Decision to plan or stop
+                if lap_count == TARGET_LAPS_EXPLORE: # Just finished the exploration lap(s)
+                    current_robot_state = STATE_PLANNING_PATH
+                    # For A*, the start is the cell where exploration ended (current_lap_end_grid_cell)
+                    # The goal is the original start of the lap (lap_origin_grid_cell)
+                    print(f"----- End of Exploration (Completed Lap {lap_count}). Current State: PLANNING PATH. -----")
+                    print(f"----- A* Start: {current_lap_end_grid_cell}, A* Goal: {lap_origin_grid_cell} -----")
+                elif lap_count >= TARGET_LAPS_TOTAL: 
+                    current_robot_state = STATE_LAPS_DONE
+                elif lap_count > TARGET_LAPS_EXPLORE and lap_count < TARGET_LAPS_TOTAL : # Finished a path-following lap, re-plan
+                    current_robot_state = STATE_PLANNING_PATH
+                    print(f"----- End of Path Following Lap {lap_count}. Current State: RE-PLANNING PATH. -----")
+                    print(f"----- A* Start: {current_lap_end_grid_cell}, A* Goal: {lap_origin_grid_cell} -----")
+
+
+    action_this_step = "INIT_STEP"; apply_new_motor_speeds_this_step = True
+    target_speed_actual_left_this_step = last_left_cmd_vel_for_log 
+    target_speed_actual_right_this_step = last_right_cmd_vel_for_log
     
-    if lap_count >= TARGET_LAPS: 
-        action = "LAPS_DONE_STOPPED"
-        target_speed_actual_left = 0.0; target_speed_actual_right = 0.0
-    elif time_in_maneuver > 0: 
-        action = "IN_MANEUVER"; time_in_maneuver -= 1
-        apply_new_motor_speeds = False 
-        current_log_left_vel = last_left_cmd_vel_for_log 
-        current_log_right_vel = last_right_cmd_vel_for_log
-    else: 
+    if current_robot_state == STATE_LAPS_DONE:
+        action_this_step = "LAPS_DONE_STOPPED"
+        target_speed_actual_left_this_step = 0.0; target_speed_actual_right_this_step = 0.0
+        if not (motor_actual_left.getVelocity() == 0.0 and motor_actual_right.getVelocity() == 0.0):
+            apply_new_motor_speeds_this_step = True 
+        else: apply_new_motor_speeds_this_step = False 
+        if not apply_new_motor_speeds_this_step and robot.getTime() > 0.1: 
+             print(f"Final stop confirmed for Lap {lap_count}. Exiting controller.")
+             break 
+    elif current_robot_state == STATE_IN_MANEUVER: 
+        action_this_step = "IN_MANEUVER"; time_in_maneuver -= 1 
+        apply_new_motor_speeds_this_step = False 
+        if time_in_maneuver <= 0: 
+            time_in_maneuver = 0
+            # After maneuver, decide if going back to exploring or path following
+            if len(planned_path_world) > 0 and lap_count >= TARGET_LAPS_EXPLORE and lap_count < TARGET_LAPS_TOTAL:
+                current_robot_state = STATE_PATH_FOLLOWING
+                print(f"DEBUG: Maneuver FINISHED. Returning to PATH_FOLLOWING. Time: {robot.getTime():.1f}s.")
+            else:
+                current_robot_state = STATE_EXPLORING_MAPPING 
+                print(f"DEBUG: Maneuver FINISHED. Returning to EXPLORING. Time: {robot.getTime():.1f}s.")
+    elif current_robot_state == STATE_PLANNING_PATH:
+        action_this_step = "PLANNING_PATH"
+        target_speed_actual_left_this_step = 0.0; target_speed_actual_right_this_step = 0.0 
+        apply_new_motor_speeds_this_step = True 
+        
+        # A* start is the cell where the *last* lap just ended. Goal is the *original* start of all laps.
+        current_astar_start_cell = (map_col_idx_robot, current_grid_y_robot_world_origin) # Robot's current cell
+
+        if current_astar_start_cell and lap_origin_grid_cell: 
+            print(f"----- Planning Path with A* from: {current_astar_start_cell} to {lap_origin_grid_cell} -----")
+            planned_path_grid_astar = a_star_search(occupancy_grid, current_astar_start_cell, lap_origin_grid_cell) 
+            
+            if planned_path_grid_astar and len(planned_path_grid_astar) > 1: 
+               planned_path_world = [grid_to_world_coords_center(gc[0], gc[1]) for gc in planned_path_grid_astar] 
+               current_path_target_idx = 0 
+               print(f"A* Path Found with {len(planned_path_world)} waypoints.")
+               current_robot_state = STATE_PATH_FOLLOWING
+            else:
+               print("A* Path Not Found or too short! Reverting to exploration for this lap.")
+               current_robot_state = STATE_EXPLORING_MAPPING 
+        else:
+            print(f"ERROR: A* start ({current_astar_start_cell}) or Lap Origin ({lap_origin_grid_cell}) not defined! Reverting."); 
+            current_robot_state = STATE_EXPLORING_MAPPING
+    elif current_robot_state == STATE_PATH_FOLLOWING:
+        if not planned_path_world or current_path_target_idx >= len(planned_path_world):
+            action_this_step = "PATH_COMPLETE_OR_ERROR"
+            print("Path finished or no path. Waiting for next red line/lap trigger."); 
+            # Stay in PATH_FOLLOWING, effectively stopped, waiting for red line to re-evaluate state
+            target_speed_actual_left_this_step = 0.0; target_speed_actual_right_this_step = 0.0
+        else:
+            action_this_step = f"PATH_FOLLOW_WP{current_path_target_idx}"
+            target_wp_x, target_wp_y = planned_path_world[current_path_target_idx] 
+            current_x, current_y, current_theta = robot_pose[0], robot_pose[1], robot_pose[2]
+            dx = target_wp_x - current_x; dy = target_wp_y - current_y
+            dist_to_target = math.sqrt(dx*dx + dy*dy)
+            angle_to_target = math.atan2(dy, dx)
+            angle_error = angle_to_target - current_theta
+            while angle_error > math.pi: angle_error -= 2 * math.pi
+            while angle_error < -math.pi: angle_error += 2 * math.pi
+            turn_cmd = 3.0 * angle_error 
+            fwd_cmd = MAX_MOTOR_SPEED * (1 - 0.95 * abs(angle_error / math.pi)) 
+            fwd_cmd = max(0.2 if dist_to_target > CELL_SIZE * 0.5 else 0, fwd_cmd) 
+            if dist_to_target < CELL_SIZE * 1.5 : 
+                print(f"Reached waypoint {current_path_target_idx} at ({target_wp_x:.2f},{target_wp_y:.2f}). Moving to next.")
+                current_path_target_idx += 1
+                if current_path_target_idx >= len(planned_path_world): 
+                     action_this_step = "PATH_COMPLETE" 
+                     print("End of planned path reached. Waiting for red line."); fwd_cmd = 0; turn_cmd = 0 
+            target_speed_actual_left_this_step = fwd_cmd - turn_cmd
+            target_speed_actual_right_this_step = fwd_cmd + turn_cmd
+            if dist_F < FRONT_OBSTACLE_THRESHOLD_DISTANCE * 0.7 : # More sensitive on path
+                print("OBSTACLE ON PLANNED PATH! Initiating maneuver.")
+                action_this_step = "OBST_ON_PATH -> TURN_L"
+                target_speed_actual_left_this_step = -TURN_IN_PLACE_SPEED
+                target_speed_actual_right_this_step = TURN_IN_PLACE_SPEED
+                current_robot_state = STATE_IN_MANEUVER; time_in_maneuver = FRONT_TURN_DURATION_STEPS
+                # Path following will resume after maneuver if still in PATH_FOLLOWING state
+    elif current_robot_state == STATE_EXPLORING_MAPPING: 
+
         if stuck_on_side_wall_counter > MAX_STEPS_STUCK_ON_SIDE:
-            action = "STUCK_SIDE_WALL -> RECOVERY_TURN_L" 
-            target_speed_actual_left = -TURN_IN_PLACE_SPEED 
-            target_speed_actual_right = TURN_IN_PLACE_SPEED
-            time_in_maneuver = RECOVERY_TURN_DURATION_STEPS 
+            action_this_step = "STUCK_EXPLORE -> RECOVERY_L"; target_speed_actual_left_this_step = -TURN_IN_PLACE_SPEED; target_speed_actual_right_this_step = TURN_IN_PLACE_SPEED
+            current_robot_state = STATE_IN_MANEUVER; time_in_maneuver = RECOVERY_TURN_DURATION_STEPS
             stuck_on_side_wall_counter = 0 
         elif dist_F < FRONT_OBSTACLE_THRESHOLD_DISTANCE:
-            action = "FRONT_OBSTACLE -> START_TURN_L" 
-            target_speed_actual_left = -TURN_IN_PLACE_SPEED 
-            target_speed_actual_right = TURN_IN_PLACE_SPEED  
-            time_in_maneuver = FRONT_TURN_DURATION_STEPS
+            action_this_step = "FRONT_OBS_EXPLORE -> TURN_L"; target_speed_actual_left_this_step = -TURN_IN_PLACE_SPEED; target_speed_actual_right_this_step = TURN_IN_PLACE_SPEED  
+            current_robot_state = STATE_IN_MANEUVER; time_in_maneuver = FRONT_TURN_DURATION_STEPS
             stuck_on_side_wall_counter = 0 
         elif dist_R < WALL_SIDE_THRESHOLD_DISTANCE: 
-            action = "WALL_R_CLOSE -> TURN_L_GENTLE"
-            target_speed_actual_left = DEFAULT_FORWARD_SPEED - SIDE_WALL_TURN_ADJUSTMENT 
-            target_speed_actual_right = DEFAULT_FORWARD_SPEED + SIDE_WALL_TURN_ADJUSTMENT
+            action_this_step = "WALL_R_CLOSE_EXPLORE -> TURN_L_GENTLE"; target_speed_actual_left_this_step = DEFAULT_FORWARD_SPEED - SIDE_WALL_TURN_ADJUSTMENT; target_speed_actual_right_this_step = DEFAULT_FORWARD_SPEED + SIDE_WALL_TURN_ADJUSTMENT
             stuck_on_side_wall_counter += 1
         elif dist_L < WALL_SIDE_THRESHOLD_DISTANCE: 
-            action = "WALL_L_CLOSE -> TURN_R_GENTLE"
-            target_speed_actual_left = DEFAULT_FORWARD_SPEED + SIDE_WALL_TURN_ADJUSTMENT 
-            target_speed_actual_right = DEFAULT_FORWARD_SPEED - SIDE_WALL_TURN_ADJUSTMENT
+            action_this_step = "WALL_L_CLOSE_EXPLORE -> TURN_R_GENTLE"; target_speed_actual_left_this_step = DEFAULT_FORWARD_SPEED + SIDE_WALL_TURN_ADJUSTMENT; target_speed_actual_right_this_step = DEFAULT_FORWARD_SPEED - SIDE_WALL_TURN_ADJUSTMENT
             stuck_on_side_wall_counter += 1
         else: 
-            action = "CLEAR -> FAST_FORWARD" 
-            target_speed_actual_left = MAX_MOTOR_SPEED 
-            target_speed_actual_right = MAX_MOTOR_SPEED 
+            action_this_step = "CLEAR_EXPLORE -> FAST_FORWARD"; target_speed_actual_left_this_step = MAX_MOTOR_SPEED; target_speed_actual_right_this_step = MAX_MOTOR_SPEED 
             stuck_on_side_wall_counter = 0 
-        
-        current_log_left_vel = target_speed_actual_left 
-        current_log_right_vel = target_speed_actual_right
+    
+    # Update log variables based on the final decision for this step
+    if not apply_new_motor_speeds_this_step and current_robot_state == STATE_IN_MANEUVER : 
+        current_log_left_vel = last_left_cmd_vel_for_log
+        current_log_right_vel = last_right_cmd_vel_for_log
+    else: 
+        current_log_left_vel = target_speed_actual_left_this_step
+        current_log_right_vel = target_speed_actual_right_this_step
             
-    if apply_new_motor_speeds:
-        clamped_left_speed = max(-MAX_MOTOR_SPEED, min(MAX_MOTOR_SPEED, target_speed_actual_left))
-        clamped_right_speed = max(-MAX_MOTOR_SPEED, min(MAX_MOTOR_SPEED, target_speed_actual_right))
+    if apply_new_motor_speeds_this_step:
+        clamped_left_speed = max(-MAX_MOTOR_SPEED, min(MAX_MOTOR_SPEED, target_speed_actual_left_this_step))
+        clamped_right_speed = max(-MAX_MOTOR_SPEED, min(MAX_MOTOR_SPEED, target_speed_actual_right_this_step))
         if motor_actual_left: motor_actual_left.setVelocity(clamped_left_speed)
         if motor_actual_right: motor_actual_right.setVelocity(clamped_right_speed)
-        last_left_cmd_vel_for_log = clamped_left_speed 
-        last_right_cmd_vel_for_log = clamped_right_speed
+        last_left_cmd_vel_for_log = clamped_left_speed; last_right_cmd_vel_for_log = clamped_right_speed
 
     if step_counter % log_interval == 0:
-        print(f"Time: {robot.getTime():.1f}s | Action: {action} | Lap: {lap_count} | StuckCtr: {stuck_on_side_wall_counter}")
+        # ... (Full logging ...
+        print(f"Time: {robot.getTime():.1f}s | Action: {action_this_step} | Lap: {lap_count} | StuckCtr: {stuck_on_side_wall_counter} | State: {current_robot_state}")
         print(f"  Pose(x,y,th_deg): {robot_pose[0]:.2f}, {robot_pose[1]:.2f}, {math.degrees(robot_pose[2]):.1f}")
         print(f"  Grid Cell (col,row_map_idx): ({map_col_idx_robot}, {map_row_idx_robot})")
-        raw_log_str = ",".join([f"{v:.0f}" for v in raw_sensor_values_for_log])
-        print(f"  RAW_AllSensors: [{raw_log_str}]")
+        raw_log_str = ",".join([f"{v:.0f}" for v in raw_sensor_values_for_log]); print(f"  RAW_AllSensors: [{raw_log_str}]")
         print(f"  DIST(L,FL,F,FR,R): {dist_L:.3f},{dist_FL:.3f},{dist_F:.3f},{dist_FR:.3f},{dist_R:.3f}m")
         print(f"  Motor CMD (L,R): {current_log_left_vel:.2f}, {current_log_right_vel:.2f} rad/s") 
         if camera and camera_width > 0: print(f"  Red Line: {red_line_detected_this_step} (Debounce: {red_line_debounce_timer})")
-        if time_in_maneuver > 0 and action == "IN_MANEUVER": 
-             print(f"  Maneuver Steps Left (after dec): {time_in_maneuver}")
-        elif action.startswith("FRONT_OBSTACLE -> START") or action.startswith("STUCK_SIDE_WALL -> RECOVERY"): 
-             print(f"  Maneuver Started (Total Steps): {time_in_maneuver}") 
+        if current_robot_state == STATE_IN_MANEUVER: print(f"  Maneuver Steps Left: {time_in_maneuver}") 
+        elif current_robot_state == STATE_PATH_FOLLOWING and not (action_this_step.startswith("PATH_COMPLETE") ): print(f"  Path Following WP Idx: {current_path_target_idx}/{len(planned_path_world)-1 if planned_path_world else 0}")
+
     
-    if step_counter % map_print_interval == 0 and lap_count < TARGET_LAPS : 
-        print(f"--- Occupancy Grid at Time {robot.getTime():.1f}s (1=trav, 2=obst) ---")
-        row_ds = max(1, GRID_DIM_Y // 20 if GRID_DIM_Y > 0 else 1)
-        col_ds = max(1, GRID_DIM_X // 40 if GRID_DIM_X > 0 else 1) 
+    if step_counter % map_print_interval == 0 and lap_count <= TARGET_LAPS_EXPLORE : 
+        # ...Map printing ...
+        print(f"--- Occupancy Grid at Time {robot.getTime():.1f}s (0=Unk,1=Trav,2=Obst) ---") 
+        row_ds = max(1, GRID_DIM_Y // 20 if GRID_DIM_Y > 0 else 1); col_ds = max(1, GRID_DIM_X // 40 if GRID_DIM_X > 0 else 1) 
         print_grid = occupancy_grid[::row_ds, ::col_ds]
-        for row_data in print_grid: 
-            char_row = []
-            for cell_val in row_data:
-                if cell_val == 1: char_row.append('#') 
-                elif cell_val == 2: char_row.append('X') 
-                else: char_row.append('.') 
-            print("".join(char_row))
+        for row_data in print_grid: print("".join(['#' if cell == 1 else ('X' if cell == 2 else '.') for cell in row_data]))
         print("-------------------------------------------------------------")
