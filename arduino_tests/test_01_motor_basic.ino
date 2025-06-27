@@ -27,10 +27,14 @@
 
 // Test parameters
 int base_speed = 150;  // PWM value (0-255)
+int min_speed = 110;   // Minimum working speed for your motors
 unsigned long last_action_time = 0;
 int test_phase = 0;
 
 void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting basic motor test...");
+  
   // Initialize motor pins
   pinMode(MOTOR_LEFT_DIR1, OUTPUT);
   pinMode(MOTOR_LEFT_DIR2, OUTPUT);
@@ -44,6 +48,7 @@ void setup() {
   // Stop motors initially
   stopMotors();
   
+  Serial.println("Motors initialized. Starting test in 3 seconds...");
   // Wait 3 seconds before starting test
   delay(3000);
   last_action_time = millis();
@@ -54,6 +59,7 @@ void loop() {
   
   switch(test_phase) {
     case 0: // Move forward for 2 seconds
+      if(current_time - last_action_time == 0) Serial.println("Phase 0: Moving forward");
       moveForward(base_speed);
       if(current_time - last_action_time >= 2000) {
         test_phase = 1;
@@ -62,6 +68,7 @@ void loop() {
       break;
       
     case 1: // Stop for 1 second
+      if(current_time - last_action_time == 0) Serial.println("Phase 1: Stopping");
       stopMotors();
       if(current_time - last_action_time >= 1000) {
         test_phase = 2;
@@ -70,6 +77,7 @@ void loop() {
       break;
       
     case 2: // Turn left for 1 second
+      if(current_time - last_action_time == 0) Serial.println("Phase 2: Turning left");
       turnLeft(base_speed);
       if(current_time - last_action_time >= 1000) {
         test_phase = 3;
@@ -78,6 +86,7 @@ void loop() {
       break;
       
     case 3: // Stop for 1 second
+      if(current_time - last_action_time == 0) Serial.println("Phase 3: Stopping");
       stopMotors();
       if(current_time - last_action_time >= 1000) {
         test_phase = 4;
@@ -86,6 +95,7 @@ void loop() {
       break;
       
     case 4: // Turn right for 1 second
+      if(current_time - last_action_time == 0) Serial.println("Phase 4: Turning right");
       turnRight(base_speed);
       if(current_time - last_action_time >= 1000) {
         test_phase = 5;
@@ -94,10 +104,12 @@ void loop() {
       break;
       
     case 5: // Stop and reset cycle
+      if(current_time - last_action_time == 0) Serial.println("Phase 5: Final stop, restarting cycle...");
       stopMotors();
       if(current_time - last_action_time >= 2000) {
         test_phase = 0;
         last_action_time = current_time;
+        Serial.println("=== RESTARTING CYCLE ===");
       }
       break;
   }

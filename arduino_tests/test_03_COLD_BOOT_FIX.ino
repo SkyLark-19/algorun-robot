@@ -52,7 +52,8 @@ bool avoiding_obstacle = false;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("ESP32 Wall Following + Obstacle Avoidance - Cold Boot Fix");
+  delay(3000);
+  Serial.println("Booting...");
   
   // Setup hardware
   setup_motors();
@@ -106,8 +107,10 @@ void setup_motors() {
   pinMode(MOTOR_RIGHT_DIR1, OUTPUT);
   pinMode(MOTOR_RIGHT_DIR2, OUTPUT);
 
+  // Setup PWM once in setup()
   ledcAttach(MOTOR_LEFT_PWM, PWM_FREQ, PWM_RESOLUTION);
   ledcAttach(MOTOR_RIGHT_PWM, PWM_FREQ, PWM_RESOLUTION);
+
 
   Serial.println("Motors initialized");
 }
@@ -128,26 +131,30 @@ void setup_tof_sensors() {
 
   // Initialize sensors one by one
   digitalWrite(TOF_XSHUT_FRONT, HIGH);
-  delay(10);
-  if (tof_front.init()) {
+  delay(50);
+  if (!tof_front.init()) {
+    Serial.println("Front sensor FAILED!");
+  } else {
     tof_front.setAddress(0x30);
-    tof_front.setTimeout(500);
     tof_front.startContinuous();
   }
 
   digitalWrite(TOF_XSHUT_FRONT_LEFT, HIGH);
-  delay(10);
-  if (tof_front_left.init()) {
+  delay(50);
+  if (!tof_front_left.init()) {
+    Serial.println("Front-left sensor FAILED!");
+  } else {
     tof_front_left.setAddress(0x33);
-    tof_front_left.setTimeout(500);
     tof_front_left.startContinuous();
   }
+  
 
   digitalWrite(TOF_XSHUT_FRONT_RIGHT, HIGH);
-  delay(10);
-  if (tof_front_right.init()) {
+  delay(50);
+  if (!tof_front_right.init()) {
+    Serial.println("Front-right sensor FAILED!");
+  } else {
     tof_front_right.setAddress(0x34);
-    tof_front_right.setTimeout(500);
     tof_front_right.startContinuous();
   }
 
@@ -252,11 +259,11 @@ void set_motor_speeds(float left_speed, float right_speed) {
   if (left_speed >= 0) {
     digitalWrite(MOTOR_LEFT_DIR1, HIGH);
     digitalWrite(MOTOR_LEFT_DIR2, LOW);
-    ledcWrite(MOTOR_LEFT_PWM, (int)abs(left_speed));
+    ledcWrite(MOTOR_LEFT_PWM, left_speed);
   } else {
     digitalWrite(MOTOR_LEFT_DIR1, LOW);
     digitalWrite(MOTOR_LEFT_DIR2, HIGH);
-    ledcWrite(MOTOR_LEFT_PWM, (int)abs(left_speed));
+    ledcWrite(MOTOR_LEFT_PWM, abs(left_speed));
   }
 
   // Right motor
