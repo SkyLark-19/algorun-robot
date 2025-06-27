@@ -1,11 +1,10 @@
 /*
- * TEST 3: Wall Following + Obstacle Avoidance
- * Purpose: Test wall following with obstacle detection and avoidance
+ * TEST 3: Wall Following + Obstacle Avoidance - COLD BOOT FIX VERSION
+ * Purpose: Fix cold boot issue 
  * Hardware: ESP32, L298N motor driver, 3x VL53L0X ToF sensors
- * VERSION: WALL FOLLOWING + OBSTACLE AVOIDANCE TEST
- * - Wall following behavior (tested ✓)
- * - Added obstacle avoidance when front sensor detects obstacle
- * - Priority: Obstacle avoidance > Wall following
+ * CHANGES FROM PREVIOUS VERSION:
+ * - Removed boot delay 
+ * - Simplified sensor init (no individual success/failure checking)
  */
 
 #include <Arduino.h>
@@ -47,12 +46,10 @@ float min_speed = 110.0;  // Minimum working speed - motors need at least this m
 bool tof_sensors_ready = false;
 
 void setup() {
-  // Wait for power to stabilize after boot
-  delay(2000);
-  
   Serial.begin(115200);
-  Serial.println("ESP32 Wall Following + Obstacle Avoidance Test");
+  Serial.println("ESP32 Wall Following + Obstacle Avoidance - Cold Boot Fix");
   
+  // Setup hardware
   setup_motors();
   setup_tof_sensors();
   
@@ -111,16 +108,13 @@ void setup_tof_sensors() {
   digitalWrite(TOF_XSHUT_FRONT_RIGHT, LOW);
   delay(10);
 
-  // Initialize sensors one by one with different I2C addresses
+  // Initialize sensors one by one
   digitalWrite(TOF_XSHUT_FRONT, HIGH);
   delay(10);
   if (tof_front.init()) {
     tof_front.setAddress(0x30);
     tof_front.setTimeout(500);
     tof_front.startContinuous();
-    Serial.println("Front sensor: OK");
-  } else {
-    Serial.println("Front sensor: FAILED");
   }
 
   digitalWrite(TOF_XSHUT_FRONT_LEFT, HIGH);
@@ -129,9 +123,6 @@ void setup_tof_sensors() {
     tof_front_left.setAddress(0x33);
     tof_front_left.setTimeout(500);
     tof_front_left.startContinuous();
-    Serial.println("Front-left sensor: OK");
-  } else {
-    Serial.println("Front-left sensor: FAILED");
   }
 
   digitalWrite(TOF_XSHUT_FRONT_RIGHT, HIGH);
@@ -140,13 +131,10 @@ void setup_tof_sensors() {
     tof_front_right.setAddress(0x34);
     tof_front_right.setTimeout(500);
     tof_front_right.startContinuous();
-    Serial.println("Front-right sensor: OK");
-  } else {
-    Serial.println("Front-right sensor: FAILED");
   }
 
   tof_sensors_ready = true;
-  Serial.println("ToF sensors initialized - ready for navigation");
+  Serial.println("ToF sensors initialized");
 }
 
 float read_tof_distance(VL53L0X &sensor) {
@@ -154,103 +142,66 @@ float read_tof_distance(VL53L0X &sensor) {
 
   uint16_t distance_mm = sensor.readRangeContinuousMillimeters();
   if (sensor.timeoutOccurred()) {
-    return 2.0;
+    return 2.0;  // Return safe distance on timeout
   }
 
-  return distance_mm / 1000.0;
+  return distance_mm / 1000.0;  // Convert to meters
 }
 
-void navigate_robot(float distances[3]) {
-  float front_distance = distances[0];
-  float front_left_distance = distances[1];
-  float front_right_distance = distances[2];
+void navigate_robot(float distances[]) {
+  float front_dist = distances[0];
+  float front_left_dist = distances[1];
+  float front_right_dist = distances[2];
   
-  static unsigned long last_nav_debug = 0;
-  
-  // PRIORITY 1: OBSTACLE AVOIDANCE (front sensor)
-  if (front_distance < OBSTACLE_THRESHOLD) {
-    if (millis() - last_nav_debug > 1000) {
-      Serial.print("OBSTACLE AHEAD! Distance: ");
-      Serial.print(front_distance, 3);
-      Serial.print("m - ");
-      last_nav_debug = millis();
-    }
+  // PRIORITY 1: Obstacle Avoidance (front sensor)
+  if (front_dist < OBSTACLE_THRESHOLD) {
+    Serial.println("OBSTACLE DETECTED - Avoiding");
     
-    // Choose turn direction based on side clearance
-    if (front_left_distance > front_right_distance) {
-      Serial.println("Turning LEFT to avoid obstacle");
-      set_motor_speeds(-turn_speed, turn_speed);  // Left turn: -140, 140
-    } else {
-      Serial.println("Turning RIGHT to avoid obstacle");
-      set_motor_speeds(turn_speed, -turn_speed);  // Right turn: 140, -140
-    }
-    return;  // Exit early - obstacle avoidance overrides wall following
+    // Stop briefly
+    set_motor_speeds(0, 0);
+    delay(200);
+    
+    // Turn right to avoid obstacle
+    set_motor_speeds(-turn_speed, turn_speed);
+    delay(800);
+    
+    // Move forward past obstacle
+    set_motor_speeds(wall_follow_speed, wall_follow_speed);
+    delay(600);
+    
+    return;  // Skip wall following this cycle
   }
   
-  // PRIORITY 2: WALL FOLLOWING (side sensors)
-  // Check for walls on left and right sides
-  bool wall_on_right = (front_right_distance < WALL_THRESHOLD);
-  bool wall_on_left = (front_left_distance < WALL_THRESHOLD);
-  
-  if (wall_on_right && !wall_on_left) {
-    // Right wall following
-    if (millis() - last_nav_debug > 1000) {
-      Serial.print("Following RIGHT wall - Distance: ");
-      Serial.print(front_right_distance, 3);
-      Serial.print("m - ");
-      last_nav_debug = millis();
-    }
+  // PRIORITY 2: Wall Following (use front-left sensor)
+  if (front_left_dist < WALL_THRESHOLD) {
+    Serial.println("WALL FOLLOWING - Following left wall");
     
-    if (front_right_distance < WALL_THRESHOLD * 0.7) {
-      // Too close to wall - turn left slightly
-      Serial.println("Too close, turning LEFT");
-      set_motor_speeds(max(wall_follow_speed - 30, min_speed), wall_follow_speed);
-    } else if (front_right_distance > WALL_THRESHOLD * 1.3) {
-      // Too far from wall - turn right slightly  
-      Serial.println("Too far, turning RIGHT");
-      set_motor_speeds(wall_follow_speed, max(wall_follow_speed - 30, min_speed));
+    // Wall detected on left - follow it
+    if (front_left_dist < WALL_THRESHOLD * 0.7) {
+      // Too close to wall - turn slightly right
+      set_motor_speeds(wall_follow_speed * 1.2, wall_follow_speed * 0.8);
+    } else if (front_left_dist > WALL_THRESHOLD * 1.3) {
+      // Too far from wall - turn slightly left  
+      set_motor_speeds(wall_follow_speed * 0.8, wall_follow_speed * 1.2);
     } else {
-      // Optimal distance - go straight
-      Serial.println("Perfect distance, going STRAIGHT");
+      // Good distance - move forward
       set_motor_speeds(wall_follow_speed, wall_follow_speed);
     }
+    return;
   }
-  else if (wall_on_left && !wall_on_right) {
-    // Left wall following
-    if (millis() - last_nav_debug > 1000) {
-      Serial.print("Following LEFT wall - Distance: ");
-      Serial.print(front_left_distance, 3);
-      Serial.print("m - ");
-      last_nav_debug = millis();
-    }
+  
+  // PRIORITY 3: Search for Wall
+  if (front_left_dist >= WALL_THRESHOLD && front_right_dist >= WALL_THRESHOLD) {
+    Serial.println("SEARCHING - Looking for wall");
     
-    if (front_left_distance < WALL_THRESHOLD * 0.7) {
-      // Too close to wall - turn right slightly
-      Serial.println("Too close, turning RIGHT");
-      set_motor_speeds(wall_follow_speed, max(wall_follow_speed - 30, min_speed));
-    } else if (front_left_distance > WALL_THRESHOLD * 1.3) {
-      // Too far from wall - turn left slightly
-      Serial.println("Too far, turning LEFT");
-      set_motor_speeds(max(wall_follow_speed - 30, min_speed), wall_follow_speed);
-    } else {
-      // Optimal distance - go straight
-      Serial.println("Perfect distance, going STRAIGHT");
-      set_motor_speeds(wall_follow_speed, wall_follow_speed);
-    }
-  }
-  else {
-    // No wall detected - search for wall (open space navigation)
-    if (millis() - last_nav_debug > 1000) {
-      Serial.println("NO WALL DETECTED - Searching for wall...");
-      last_nav_debug = millis();
-    }
-    // Move forward and slightly right to search for right wall
-    set_motor_speeds(base_speed, max(base_speed - 20, min_speed));
+    // No wall detected - search for one
+    set_motor_speeds(base_speed * 0.7, base_speed);  // Gentle left turn while moving
+    return;
   }
 }
 
 void set_motor_speeds(float left_speed, float right_speed) {
-  // Apply minimum speed constraint - motors need sufficient power to overcome friction
+  // Apply minimum speed constraint
   if (left_speed > 0 && left_speed < min_speed) left_speed = min_speed;
   if (left_speed < 0 && left_speed > -min_speed) left_speed = -min_speed;
   if (right_speed > 0 && right_speed < min_speed) right_speed = min_speed;
