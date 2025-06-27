@@ -1,12 +1,12 @@
 /*
- * TEST 3: Three-Sensor Wall Following 
- * Purpose: Copy exact sensor initialization that works on hardware
+ * TEST 3: Wall Following + Obstacle Avoidance
+ * Purpose: Test wall following with obstacle detection and avoidance
  * Hardware: ESP32, L298N motor driver, 3x VL53L0X ToF sensors
  * 
- * VERSION: MINIMUM SPEED ENFORCED
- * - All motor speeds >= 110 (minimum for reliable movement)
- * - Added minimum speed constraint in set_motor_speeds()
- * - Fixed all hardcoded low speeds in tests and navigation
+ * VERSION: WALL FOLLOWING + OBSTACLE AVOIDANCE TEST
+ * - Wall following behavior (tested ✓)
+ * - Added obstacle avoidance when front sensor detects obstacle
+ * - Priority: Obstacle avoidance > Wall following
  */
 
 #include <Arduino.h>
@@ -49,42 +49,37 @@ bool tof_sensors_ready = false;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("ESP32 Three-Sensor Test");
+  Serial.println("ESP32 Wall Following + Obstacle Avoidance Test");
   
   setup_motors();
-  test_motors_basic();
   setup_tof_sensors();
   
-  Serial.println("Robot initialized. Starting navigation...");
+  Serial.println("Robot initialized. Testing WALL FOLLOWING + OBSTACLE AVOIDANCE...");
 }
 
 void loop() {
-  if (tof_sensors_ready) {
-    // Read sensors and navigate
-    float distances[3];  // front, front-left, front-right
-    distances[0] = read_tof_distance(tof_front);
-    distances[1] = read_tof_distance(tof_front_left);
-    distances[2] = read_tof_distance(tof_front_right);
-    
-    // Simple navigation
-    navigate_robot(distances);
-    
-    // Debug output every 2 seconds
-    static unsigned long last_debug = 0;
-    if (millis() - last_debug > 2000) {
-      Serial.print("Distances - F:");
-      Serial.print(distances[0], 3);
-      Serial.print(" FL:");
-      Serial.print(distances[1], 3);
-      Serial.print(" FR:");
-      Serial.print(distances[2], 3);
-      Serial.println();
-      last_debug = millis();
-    }
-  } else {
-    // Motor test pattern
-    motor_test_pattern();
+  // Read sensors and navigate
+  float distances[3];  // front, front-left, front-right
+  distances[0] = read_tof_distance(tof_front);
+  distances[1] = read_tof_distance(tof_front_left);
+  distances[2] = read_tof_distance(tof_front_right);
+  
+  // Wall following navigation
+  navigate_robot(distances);
+  
+  // Debug output every 2 seconds
+  static unsigned long last_debug = 0;
+  if (millis() - last_debug > 2000) {
+    Serial.print("Distances - F:");
+    Serial.print(distances[0], 3);
+    Serial.print(" FL:");
+    Serial.print(distances[1], 3);
+    Serial.print(" FR:");
+    Serial.print(distances[2], 3);
+    Serial.println();
+    last_debug = millis();
   }
+  
   delay(50);
 }
 
@@ -98,27 +93,6 @@ void setup_motors() {
   ledcAttach(MOTOR_RIGHT_PWM, PWM_FREQ, PWM_RESOLUTION);
 
   Serial.println("Motors initialized");
-}
-
-void test_motors_basic() {
-  Serial.println("Testing motors...");
-  
-  set_motor_speeds(120, 120);  // Forward at minimum reliable speed
-  delay(1000);
-  set_motor_speeds(0, 0);
-  delay(500);
-  
-  set_motor_speeds(-120, 120);  // Left turn at minimum reliable speed
-  delay(500);
-  set_motor_speeds(0, 0);
-  delay(500);
-  
-  set_motor_speeds(120, -120);  // Right turn at minimum reliable speed
-  delay(500);
-  set_motor_speeds(0, 0);
-  delay(500);
-  
-  Serial.println("Motor test completed");
 }
 
 void setup_tof_sensors() {
@@ -170,19 +144,7 @@ void setup_tof_sensors() {
   }
 
   tof_sensors_ready = true;
-  Serial.println("ToF sensors initialized");
-  
-  // Success pattern if we get here - using minimum reliable speeds
-  set_motor_speeds(120, 120);
-  delay(500);
-  set_motor_speeds(110, 140);
-  delay(400);
-  set_motor_speeds(140, 110);
-  delay(800);
-  set_motor_speeds(110, 140);
-  delay(400);
-  set_motor_speeds(0, 0);
-  delay(1000);
+  Serial.println("ToF sensors initialized - ready for navigation");
 }
 
 float read_tof_distance(VL53L0X &sensor) {
@@ -203,99 +165,85 @@ void navigate_robot(float distances[3]) {
   
   static unsigned long last_nav_debug = 0;
   
-  // Obstacle avoidance - front detection
+  // PRIORITY 1: OBSTACLE AVOIDANCE (front sensor)
   if (front_distance < OBSTACLE_THRESHOLD) {
     if (millis() - last_nav_debug > 1000) {
-      Serial.println("Obstacle ahead - turning");
+      Serial.print("OBSTACLE AHEAD! Distance: ");
+      Serial.print(front_distance, 3);
+      Serial.print("m - ");
       last_nav_debug = millis();
     }
+    
     // Choose turn direction based on side clearance
     if (front_left_distance > front_right_distance) {
+      Serial.println("Turning LEFT to avoid obstacle");
       set_motor_speeds(-turn_speed, turn_speed);  // Left turn: -140, 140
     } else {
+      Serial.println("Turning RIGHT to avoid obstacle");
       set_motor_speeds(turn_speed, -turn_speed);  // Right turn: 140, -140
     }
-    return;
+    return;  // Exit early - obstacle avoidance overrides wall following
   }
   
-  // Wall following behavior
+  // PRIORITY 2: WALL FOLLOWING (side sensors)
+  // Check for walls on left and right sides
   bool wall_on_right = (front_right_distance < WALL_THRESHOLD);
   bool wall_on_left = (front_left_distance < WALL_THRESHOLD);
   
   if (wall_on_right && !wall_on_left) {
     // Right wall following
     if (millis() - last_nav_debug > 1000) {
-      Serial.println("Following right wall");
+      Serial.print("Following RIGHT wall - Distance: ");
+      Serial.print(front_right_distance, 3);
+      Serial.print("m - ");
       last_nav_debug = millis();
     }
+    
     if (front_right_distance < WALL_THRESHOLD * 0.7) {
-      // Too close - turn left slightly
+      // Too close to wall - turn left slightly
+      Serial.println("Too close, turning LEFT");
       set_motor_speeds(max(wall_follow_speed - 30, min_speed), wall_follow_speed);
     } else if (front_right_distance > WALL_THRESHOLD * 1.3) {
-      // Too far - turn right slightly  
+      // Too far from wall - turn right slightly  
+      Serial.println("Too far, turning RIGHT");
       set_motor_speeds(wall_follow_speed, max(wall_follow_speed - 30, min_speed));
     } else {
-      // Optimal distance - straight
+      // Optimal distance - go straight
+      Serial.println("Perfect distance, going STRAIGHT");
       set_motor_speeds(wall_follow_speed, wall_follow_speed);
     }
   }
   else if (wall_on_left && !wall_on_right) {
     // Left wall following
     if (millis() - last_nav_debug > 1000) {
-      Serial.println("Following left wall");
+      Serial.print("Following LEFT wall - Distance: ");
+      Serial.print(front_left_distance, 3);
+      Serial.print("m - ");
       last_nav_debug = millis();
     }
+    
     if (front_left_distance < WALL_THRESHOLD * 0.7) {
-      // Too close - turn right slightly
+      // Too close to wall - turn right slightly
+      Serial.println("Too close, turning RIGHT");
       set_motor_speeds(wall_follow_speed, max(wall_follow_speed - 30, min_speed));
     } else if (front_left_distance > WALL_THRESHOLD * 1.3) {
-      // Too far - turn left slightly
+      // Too far from wall - turn left slightly
+      Serial.println("Too far, turning LEFT");
       set_motor_speeds(max(wall_follow_speed - 30, min_speed), wall_follow_speed);
     } else {
-      // Optimal distance - straight
+      // Optimal distance - go straight
+      Serial.println("Perfect distance, going STRAIGHT");
       set_motor_speeds(wall_follow_speed, wall_follow_speed);
     }
   }
-  else if (wall_on_left && wall_on_right) {
-    // Corridor navigation
-    if (millis() - last_nav_debug > 1000) {
-      Serial.println("Corridor navigation");
-      last_nav_debug = millis();
-    }
-    set_motor_speeds(base_speed, base_speed);
-  }
   else {
-    // Open space - search for right wall with minimum speed
+    // No wall detected - search for wall (open space navigation)
     if (millis() - last_nav_debug > 1000) {
-      Serial.println("Open space navigation");
+      Serial.println("NO WALL DETECTED - Searching for wall...");
       last_nav_debug = millis();
     }
+    // Move forward and slightly right to search for right wall
     set_motor_speeds(base_speed, max(base_speed - 20, min_speed));
-  }
-}
-
-void motor_test_pattern() {
-  static unsigned long last_pattern_time = 0;
-  static int pattern_state = 0;
-  
-  if (millis() - last_pattern_time > 1500) {
-    pattern_state = (pattern_state + 1) % 4;
-    last_pattern_time = millis();
-    
-    switch(pattern_state) {
-      case 0:
-        set_motor_speeds(120, 120);  // Forward
-        break;
-      case 1:
-        set_motor_speeds(120, -120);  // Right turn
-        break;
-      case 2:
-        set_motor_speeds(120, 120);  // Forward
-        break;
-      case 3:
-        set_motor_speeds(-120, 120);  // Left turn
-        break;
-    }
   }
 }
 
