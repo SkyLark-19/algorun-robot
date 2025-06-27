@@ -6,7 +6,8 @@
  * - Removed boot delay 
  * - Simplified sensor init (no individual success/failure checking)
  */
-
+#include <WiFi.h>
+#include <SPIFFS.h>
 #include <Arduino.h>
 #include <Wire.h>
 #include <VL53L0X.h>
@@ -45,6 +46,10 @@ float min_speed = 110.0;  // Minimum working speed - motors need at least this m
 // Status flag
 bool tof_sensors_ready = false;
 
+// Globals for non-blocking control
+unsigned long avoid_start_time = 0;
+bool avoiding_obstacle = false;
+
 void setup() {
   Serial.begin(115200);
   Serial.println("ESP32 Wall Following + Obstacle Avoidance - Cold Boot Fix");
@@ -64,7 +69,20 @@ void loop() {
   distances[2] = read_tof_distance(tof_front_right);
   
   // Wall following navigation
-  navigate_robot(distances);
+  if (avoiding_obstacle) {
+    handle_avoidance(distances[0]);
+  } else {
+    // Normal navigation
+    if (distances[0] < OBSTACLE_THRESHOLD) {
+      avoiding_obstacle = true;
+      avoid_start_time = millis();
+      Serial.println("OBSTACLE DETECTED - Starting avoidance");
+      // Immediately stop before pivot
+      set_motor_speeds(0, 0);
+    } else {
+      navigate_robot(distances);  // Your original wall-following logic here
+    }
+  }
   
   // Debug output every 2 seconds
   static unsigned long last_debug = 0;
@@ -198,6 +216,29 @@ void navigate_robot(float distances[]) {
     set_motor_speeds(base_speed * 0.7, base_speed);  // Gentle left turn while moving
     return;
   }
+}
+
+void handle_avoidance(float front_distance) {
+    // Pivot right (left motor reverse, right motor forward)
+    set_motor_speeds(-turn_speed, turn_speed);
+  
+    // Continue pivoting until front is clear or timeout reached
+    if (front_distance > OBSTACLE_THRESHOLD) {
+      Serial.println("Obstacle cleared, moving forward");
+      avoiding_obstacle = false;
+  
+      // Move forward for a short burst to get past obstacle
+      unsigned long forward_start = millis();
+      while (millis() - forward_start < 600) {
+        set_motor_speeds(wall_follow_speed, wall_follow_speed);
+        delay(10);  // tiny delay to not block ESP completely
+      }
+      set_motor_speeds(0, 0); // stop after forward burst
+    } else if (millis() - avoid_start_time > 3000) {
+      // Timeout if stuck, force exit
+      Serial.println("Avoidance timeout, forcing exit");
+      avoiding_obstacle = false;
+    }
 }
 
 void set_motor_speeds(float left_speed, float right_speed) {
