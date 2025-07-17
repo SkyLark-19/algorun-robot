@@ -11,7 +11,7 @@
  * USAGE:
  * 1. Place robot on red start line
  * 2. Robot automatically detects start and completes round
- * 3. After finish, robot auto-resets for next round
+ * 3. After finish, robot auto-resets for next round 
  * 4. Manual commands: "RESET", "STATUS", "HELP"
  * 
  * HARDWARE: ESP32, L298N, N20 Motors, VL53L0X x5, TCS230
